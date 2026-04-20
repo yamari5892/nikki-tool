@@ -58,6 +58,7 @@ def _init_session_state():
         "page": "input",          # 現在の画面
         "session_id": None,       # DB セッション ID
         "diary_text": "",         # ユーザーが書いた日記
+        "depth_level": "normal",  # 深掘りレベル: shallow / normal / deep
         "current_question": "",   # 深掘りエージェントからの現在の質問
         "cause_analysis": "",     # 原因分析テキスト
         "analyzed_text": "",      # 日記 + 原因分析をまとめた文字列(生成・批判エージェントへ渡す)
@@ -102,21 +103,37 @@ def page_input():
         height=180,
     )
 
-    # Phase 2 で3段階選択を実装するとき、ここをセレクトボックスに変えるだけで動く
-    st.caption("深掘りレベル: 普通（Phase 1 固定）")
+    # 深掘りレベルの選択: ラベルと内部値を対応させて管理する
+    _LEVEL_LABELS = ["浅い（対話スキップ）", "普通（2〜3往復）", "深い（5〜6往復）"]
+    _LABEL_TO_VALUE = {
+        "浅い（対話スキップ）": "shallow",
+        "普通（2〜3往復）": "normal",
+        "深い（5〜6往復）": "deep",
+    }
+    selected_label = st.radio(
+        "深掘りレベル",
+        _LEVEL_LABELS,
+        index=1,          # デフォルトは「普通」
+        horizontal=True,
+        help="浅い: 日記のみで即分析 / 普通: 2〜3回の対話 / 深い: 5〜6回、または十分と判断した時点で終了",
+    )
+    depth_level = _LABEL_TO_VALUE[selected_label]
 
     if st.button("送信して深掘りを始める", type="primary", disabled=not diary.strip()):
+        # 選択したレベルを session_state に保存し、deep_dive 画面でも参照できるようにする
+        st.session_state.depth_level = depth_level
+
         with st.spinner("セッションを準備中..."):
             # DB にセッションを作成して以降の書き込みの基点にする
-            sid = create_session(diary.strip(), depth_level="normal")
+            sid = create_session(diary.strip(), depth_level=depth_level)
             st.session_state.session_id = sid
             st.session_state.diary_text = diary.strip()
 
-            # 最初の質問を生成する(user_message=None = 最初の呼び出し)
-            result = run_deep_dive(sid, diary.strip())
+            # 最初の呼び出し: user_message=None で初回の質問 or 即完了(shallow)を得る
+            result = run_deep_dive(sid, diary.strip(), depth_level=depth_level)
 
         if result.get("done"):
-            # レベルが shallow の場合など、即完了するケースへの対応
+            # shallow の場合は対話をスキップして直接原因分析へ
             _handle_deep_dive_done(result["cause_analysis"])
         else:
             st.session_state.current_question = result["question"]
@@ -164,10 +181,12 @@ def page_deep_dive():
 
         with st.chat_message("assistant"):
             with st.spinner("考えています..."):
+                # depth_level を毎ターン渡すことで、エージェントが残りターン数を正しく把握できる
                 result = run_deep_dive(
                     st.session_state.session_id,
                     st.session_state.diary_text,
                     user_message=answer,
+                    depth_level=st.session_state.depth_level,
                 )
 
         if result.get("done"):
